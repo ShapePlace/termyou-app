@@ -33,6 +33,15 @@ jobs:
           if text.count(original) != 1:
               raise SystemExit('Expected exactly one package-name assignment; aborting.')
           path.write_text(text.replace(original, replacement, 1))
+
+          # bzip2 is a subpackage of libbz2, not a standalone source recipe.
+          bootstrap = Path('scripts/build-bootstraps.sh')
+          text = bootstrap.read_text()
+          original = 'PACKAGES+=("bzip2")'
+          replacement = 'PACKAGES+=("libbz2")'
+          if text.count(original) != 1:
+              raise SystemExit('Expected exactly one bzip2 entry; aborting.')
+          bootstrap.write_text(text.replace(original, replacement, 1))
           PY
           grep -Fx 'TERMUX_APP__PACKAGE_NAME="com.termyou"' scripts/properties.sh
           git rev-parse HEAD
@@ -51,6 +60,11 @@ jobs:
           set -euo pipefail
           test -s bootstrap-arm.zip
           unzip -t bootstrap-arm.zip > /dev/null
+          unzip -Z1 bootstrap-arm.zip > archive-files.txt
+          if ! grep -Eq '^(\./)?bin/bzip2$' archive-files.txt; then
+            echo 'ERROR: bootstrap archive does not contain bin/bzip2' >&2
+            exit 1
+          fi
           sha256sum bootstrap-arm.zip > SHA256SUMS.txt
           {
             echo 'Experimental bootstrap; not an APK and not device-tested.'
