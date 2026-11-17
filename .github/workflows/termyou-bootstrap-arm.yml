@@ -41,7 +41,14 @@ jobs:
           replacement = 'PACKAGES+=("libbz2")'
           if text.count(original) != 1:
               raise SystemExit('Expected exactly one bzip2 entry; aborting.')
-          bootstrap.write_text(text.replace(original, replacement, 1))
+          text = text.replace(original, replacement, 1)
+
+          # Fail the build if archive creation or its final move fails.
+          old_archive = '\t\tzip -r9 "${BOOTSTRAP_TMPDIR}/bootstrap-${1}.zip" ./*\n\t)\n\n\tmv -f "${BOOTSTRAP_TMPDIR}/bootstrap-${1}.zip" "$TERMUX_PACKAGES_DIRECTORY/"\n'
+          new_archive = '\t\tzip -r9 "${BOOTSTRAP_TMPDIR}/bootstrap-${1}.zip" ./*\n\t) || return $?\n\n\tmv -f "${BOOTSTRAP_TMPDIR}/bootstrap-${1}.zip" "$TERMUX_PACKAGES_DIRECTORY/" || return $?\n'
+          if text.count(old_archive) != 1:
+              raise SystemExit('Could not find the expected archive commands; aborting.')
+          bootstrap.write_text(text.replace(old_archive, new_archive, 1))
           PY
           grep -Fx 'TERMUX_APP__PACKAGE_NAME="com.termyou"' scripts/properties.sh
           git rev-parse HEAD
@@ -51,6 +58,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # This is an isolated checkout on the temporary GitHub runner.
+          # The container's builder must be able to write the final ZIP here.
+          chmod a+rwx .
+          ./scripts/run-docker.sh sh -c 'touch /home/builder/termux-packages/.termyou-write-test && rm /home/builder/termux-packages/.termyou-write-test'
           ./scripts/run-docker.sh ./scripts/build-bootstraps.sh --architectures arm
 
       - name: Check archive and record build information
@@ -58,8 +69,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -s bootstrap-arm.zip
-          unzip -t bootstrap-arm.zip > /dev/null
+          if [ ! -s bootstrap-arm.zip ]; then
+            echo 'ERROR: bootstrap-arm.zip is missing or empty' >&2
+            ls -la
+            exit 1
+          fi
+          if ! unzip -t bootstrap-arm.zip > unzip-test.log 2>&1; then
+            echo 'ERROR: ZIP integrity check failed' >&2
+            tail -n 50 unzip-test.log >&2
+            exit 1
+          fi
+          echo 'ZIP integrity check passed.'
           unzip -Z1 bootstrap-arm.zip > archive-files.txt
           if ! grep -Eq '^(\./)?bin/bzip2$' archive-files.txt; then
             echo 'ERROR: bootstrap archive does not contain bin/bzip2' >&2
@@ -74,7 +94,8 @@ jobs:
             echo "Builder image ID: $(docker image inspect ghcr.io/termux/package-builder --format '{{.Id}}')"
           } > BUILD-INFO.txt
 
-      - name: Upload bootstrap artifact
+      - name: Upload bootstrap artifact (including for diagnostics if validation fails)
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: termyou-bootstrap-arm-experimental
@@ -82,5 +103,5 @@ jobs:
             termux-packages/bootstrap-arm.zip
             termux-packages/SHA256SUMS.txt
             termux-packages/BUILD-INFO.txt
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7
