@@ -1,0 +1,72 @@
+name: Termyou experimental ARM bootstrap
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Check out Termux package sources
+        uses: actions/checkout@v4
+        with:
+          repository: termux/termux-packages
+          ref: 4d69490e5b9526ccbef2bd18a026061f6d06ba95
+          path: termux-packages
+          persist-credentials: false
+
+      - name: Set the Termyou package name
+        working-directory: termux-packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/properties.sh')
+          text = path.read_text()
+          original = 'TERMUX_APP__PACKAGE_NAME="com.termux"'
+          replacement = 'TERMUX_APP__PACKAGE_NAME="com.termyou"'
+          if text.count(original) != 1:
+              raise SystemExit('Expected exactly one package-name assignment; aborting.')
+          path.write_text(text.replace(original, replacement, 1))
+          PY
+          grep -Fx 'TERMUX_APP__PACKAGE_NAME="com.termyou"' scripts/properties.sh
+          git rev-parse HEAD
+
+      - name: Build ARM bootstrap (experimental)
+        working-directory: termux-packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/run-docker.sh ./scripts/build-bootstraps.sh --architectures arm
+
+      - name: Check archive and record build information
+        working-directory: termux-packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s bootstrap-arm.zip
+          unzip -t bootstrap-arm.zip > /dev/null
+          sha256sum bootstrap-arm.zip > SHA256SUMS.txt
+          {
+            echo 'Experimental bootstrap; not an APK and not device-tested.'
+            echo 'Target package: com.termyou'
+            echo 'Target architecture: arm (armeabi-v7a)'
+            echo "termux-packages commit: $(git rev-parse HEAD)"
+            echo "Builder image ID: $(docker image inspect ghcr.io/termux/package-builder --format '{{.Id}}')"
+          } > BUILD-INFO.txt
+
+      - name: Upload bootstrap artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: termyou-bootstrap-arm-experimental
+          path: |
+            termux-packages/bootstrap-arm.zip
+            termux-packages/SHA256SUMS.txt
+            termux-packages/BUILD-INFO.txt
+          if-no-files-found: error
+          retention-days: 7
