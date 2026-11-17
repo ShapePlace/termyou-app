@@ -53,7 +53,36 @@ jobs:
           new_archive = '\t\tzip -r9 "${BOOTSTRAP_TMPDIR}/bootstrap-${1}.zip" ./*\n\t) || return $?\n\n\tmv -f "${BOOTSTRAP_TMPDIR}/bootstrap-${1}.zip" "$TERMUX_BUILT_DEBS_DIRECTORY/" || return $?\n'
           if text.count(old_archive) != 1:
               raise SystemExit('Could not find the expected archive commands; aborting.')
-          bootstrap.write_text(text.replace(old_archive, new_archive, 1))
+          text = text.replace(old_archive, new_archive, 1)
+
+          # The upstream script did not set these two substitutions in this path.
+          old_arch = 'add_termux_bootstrap_second_stage_files "$package_arch"'
+          new_arch = 'add_termux_bootstrap_second_stage_files "$TERMUX_ARCH"'
+          old_manager = 's|@TERMUX_PACKAGE_MANAGER@|${TERMUX_PACKAGE_MANAGER}|g'
+          new_manager = 's|@TERMUX_PACKAGE_MANAGER@|apt|g'
+          if text.count(old_arch) != 1 or text.count(old_manager) != 1:
+              raise SystemExit('Expected second-stage substitutions not found')
+          text = text.replace(old_arch, new_arch, 1).replace(old_manager, new_manager, 1)
+          bootstrap.write_text(text)
+
+          # The diagnostic workflow confirmed that these exports fix termux-tools.
+          recipe = Path('packages/termux-tools/build.sh')
+          text = recipe.read_text()
+          old = 'termux_step_pre_configure() {\n\tautoreconf -vfi\n}'
+          new = 'termux_step_pre_configure() {\n\texport TERMUX_APP_PACKAGE TERMUX_BASE_DIR TERMUX_CACHE_DIR TERMUX_PREFIX TERMUX_ANDROID_HOME\n\tautoreconf -vfi\n}'
+          if text.count(old) != 1:
+              raise SystemExit('Expected termux-tools configure hook not found')
+          recipe.write_text(text.replace(old, new, 1))
+
+          # Keep the first experimental bootstrap offline by default.
+          # Do not substitute a custom public repository without verification.
+          recipe = Path('packages/apt/build.sh')
+          text = recipe.read_text()
+          old = 'echo "deb https://packages-cf.termux.dev/apt/termux-main/ stable main"'
+          new = 'echo "# Disabled in experimental Termyou: official Termux repository is incompatible"'
+          if text.count(old) != 1:
+              raise SystemExit('Expected default apt repository entry not found')
+          recipe.write_text(text.replace(old, new, 1))
           PY
           grep -Fx 'TERMUX_APP__PACKAGE_NAME="com.termyou"' scripts/properties.sh
           git rev-parse HEAD
@@ -102,11 +131,61 @@ jobs:
             echo 'ERROR: bootstrap archive does not contain bin/bzip2' >&2
             exit 1
           fi
+          # Validate the generated bootstrap, not just the build log.
+          unzip -p output/bootstrap-arm.zip bin/login > login-check.txt
+          if ! grep -Fq '/data/data/com.termyou/files/usr/' login-check.txt ||
+             grep -Fq '/data/data/com.termux/' login-check.txt; then
+            echo 'ERROR: login has an unexpected prefix' >&2
+            exit 1
+          fi
+          unzip -p output/bootstrap-arm.zip etc/termux/termux-bootstrap/second-stage/termux-bootstrap-second-stage.sh > second-stage-check.txt
+          grep -Fx 'export TERMUX_PREFIX="/data/data/com.termyou/files/usr"' second-stage-check.txt
+          grep -Fx 'export TERMUX_PACKAGE_MANAGER="apt"' second-stage-check.txt
+          grep -Fx 'export TERMUX_PACKAGE_ARCH="arm"' second-stage-check.txt
+          unzip -p output/bootstrap-arm.zip etc/apt/sources.list > sources-check.txt
+          if grep -Eq '^[[:space:]]*(deb|deb-src)[[:space:]]' sources-check.txt; then
+            echo 'ERROR: apt sources.list contains an active repository' >&2
+            exit 1
+          fi
+          if grep -Eq '^(\./)?etc/apt/sources\.list\.d/.*\.(list|sources)$' archive-files.txt; then
+            echo 'ERROR: extra apt source files require manual review' >&2
+            exit 1
+          fi
+          echo 'PASS: login, second-stage settings, and offline sources checks.'
+          python3 - <<'PYSCAN'
+          import zipfile
+          old_prefix = b'/data/data/com.termux/'
+          found = []
+          with zipfile.ZipFile('output/bootstrap-arm.zip') as archive:
+              for info in archive.infolist():
+                  if info.is_dir():
+                      continue
+                  with archive.open(info) as f:
+                      tail = b''
+                      while True:
+                          chunk = f.read(1024 * 1024)
+                          if not chunk:
+                              break
+                          data = tail + chunk
+                          if old_prefix in data:
+                              found.append(info.filename)
+                              break
+                          tail = data[-len(old_prefix):]
+          with open('prefix-reference-report.txt', 'w', encoding='utf-8') as report:
+              report.write('Files containing /data/data/com.termux/; references require manual review.\n')
+              report.write('Matches can include documentation or legitimate references.\n\n')
+              for name in found:
+                  report.write(name + '\n')
+          print(f'Old-prefix reference scan: {len(found)} file(s); see prefix-reference-report.txt.')
+          for name in found[:20]:
+              print(name)
+          PYSCAN
           sha256sum output/bootstrap-arm.zip > SHA256SUMS.txt
           {
             echo 'Experimental bootstrap; not an APK and not device-tested.'
             echo 'Target package: com.termyou'
             echo 'Target architecture: arm (armeabi-v7a)'
+            echo 'APT repositories disabled by default; package support not yet configured.'
             echo "termux-packages commit: $(git rev-parse HEAD)"
             echo "Builder image ID: $(docker image inspect ghcr.io/termux/package-builder --format '{{.Id}}')"
           } > BUILD-INFO.txt
@@ -120,5 +199,6 @@ jobs:
             termux-packages/output/bootstrap-arm.zip
             termux-packages/SHA256SUMS.txt
             termux-packages/BUILD-INFO.txt
+            termux-packages/prefix-reference-report.txt
           if-no-files-found: warn
           retention-days: 7
