@@ -1,0 +1,86 @@
+name: Termyou termux-tools diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out pinned Termux package sources
+        uses: actions/checkout@v4
+        with:
+          repository: termux/termux-packages
+          ref: 4d69490e5b9526ccbef2bd18a026061f6d06ba95
+          path: termux-packages
+          persist-credentials: false
+
+      - name: Prepare experimental termux-tools configuration
+        working-directory: termux-packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/properties.sh')
+          text = p.read_text()
+          old = 'TERMUX_APP__PACKAGE_NAME="com.termux"'
+          if text.count(old) != 1:
+              raise SystemExit('Could not find expected package assignment')
+          p.write_text(text.replace(old, 'TERMUX_APP__PACKAGE_NAME="com.termyou"', 1))
+
+          p = Path('packages/termux-tools/build.sh')
+          text = p.read_text()
+          old = 'termux_step_pre_configure() {\n\tautoreconf -vfi\n}'
+          new = 'termux_step_pre_configure() {\n\texport TERMUX_APP_PACKAGE TERMUX_BASE_DIR TERMUX_CACHE_DIR TERMUX_PREFIX TERMUX_ANDROID_HOME\n\tautoreconf -vfi\n}'
+          if text.count(old) != 1:
+              raise SystemExit('Could not find expected termux-tools configure hook')
+          p.write_text(text.replace(old, new, 1))
+          PY
+          bash -n packages/termux-tools/build.sh
+
+      - name: Check container output permissions
+        working-directory: termux-packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          chmod a+rwx output
+          ./scripts/run-docker.sh sh -c 'printf ok > /home/builder/termux-packages/output/.termyou-write-test'
+          test "$(cat output/.termyou-write-test)" = ok
+          rm output/.termyou-write-test
+
+      - name: Build only termux-tools for ARM without dependencies
+        working-directory: termux-packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/run-docker.sh ./build-package.sh -s -a arm termux-tools
+
+      - name: Inspect the generated login script
+        working-directory: termux-packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          packages=(output/termux-tools_*_arm.deb)
+          if [ "${#packages[@]}" -ne 1 ]; then
+            echo "Expected one termux-tools ARM package, found ${#packages[@]}" >&2
+            ls -la output >&2
+            exit 1
+          fi
+          mkdir -p diagnostic-unpacked
+          dpkg-deb -x "${packages[0]}" diagnostic-unpacked
+          login=diagnostic-unpacked/data/data/com.termyou/files/usr/bin/login
+          test -f "$login"
+          grep -Fm 5 '/data/data/com.termyou/files/usr/' "$login"
+          if grep -Fq '/data/data/com.termux/' "$login"; then
+            echo 'ERROR: old Termux prefix remains in bin/login' >&2
+            exit 1
+          fi
+          echo 'PASS: login uses the Termyou prefix, not the old Termux prefix.'
+          echo 'This diagnostic does not build or validate a full bootstrap or APK.'
