@@ -2,6 +2,11 @@ name: Termyou experimental ARM bootstrap
 
 on:
   workflow_dispatch:
+    inputs:
+      preflight_only:
+        description: 'Only test container output permissions (no full build)'
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -45,7 +50,7 @@ jobs:
 
           # Fail the build if archive creation or its final move fails.
           old_archive = '\t\tzip -r9 "${BOOTSTRAP_TMPDIR}/bootstrap-${1}.zip" ./*\n\t)\n\n\tmv -f "${BOOTSTRAP_TMPDIR}/bootstrap-${1}.zip" "$TERMUX_PACKAGES_DIRECTORY/"\n'
-          new_archive = '\t\tzip -r9 "${BOOTSTRAP_TMPDIR}/bootstrap-${1}.zip" ./*\n\t) || return $?\n\n\tmv -f "${BOOTSTRAP_TMPDIR}/bootstrap-${1}.zip" "$TERMUX_PACKAGES_DIRECTORY/" || return $?\n'
+          new_archive = '\t\tzip -r9 "${BOOTSTRAP_TMPDIR}/bootstrap-${1}.zip" ./*\n\t) || return $?\n\n\tmv -f "${BOOTSTRAP_TMPDIR}/bootstrap-${1}.zip" "$TERMUX_BUILT_DEBS_DIRECTORY/" || return $?\n'
           if text.count(old_archive) != 1:
               raise SystemExit('Could not find the expected archive commands; aborting.')
           bootstrap.write_text(text.replace(old_archive, new_archive, 1))
@@ -53,39 +58,51 @@ jobs:
           grep -Fx 'TERMUX_APP__PACKAGE_NAME="com.termyou"' scripts/properties.sh
           git rev-parse HEAD
 
-      - name: Build ARM bootstrap (experimental)
+      - name: Preflight container output permissions
         working-directory: termux-packages
         shell: bash
         run: |
           set -euo pipefail
-          # This is an isolated checkout on the temporary GitHub runner.
-          # The container's builder must be able to write the final ZIP here.
-          chmod a+rwx .
-          ./scripts/run-docker.sh sh -c 'touch /home/builder/termux-packages/.termyou-write-test && rm /home/builder/termux-packages/.termyou-write-test'
+          # The upstream restricted AppArmor policy permits writes to output/.
+          # This checkout is temporary and contains no persisted credentials.
+          mkdir -p output
+          chmod a+rwx output
+          ./scripts/run-docker.sh sh -c 'printf ok > /home/builder/termux-packages/output/.termyou-write-test'
+          test "$(cat output/.termyou-write-test)" = ok
+          rm output/.termyou-write-test
+          echo 'Preflight passed: container can write to output/.'
+
+      - name: Build ARM bootstrap (experimental)
+        if: ${{ !inputs.preflight_only }}
+        working-directory: termux-packages
+        shell: bash
+        run: |
+          set -euo pipefail
           ./scripts/run-docker.sh ./scripts/build-bootstraps.sh --architectures arm
 
       - name: Check archive and record build information
+        if: ${{ !inputs.preflight_only }}
         working-directory: termux-packages
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -s bootstrap-arm.zip ]; then
-            echo 'ERROR: bootstrap-arm.zip is missing or empty' >&2
-            ls -la
+          if [ ! -s output/bootstrap-arm.zip ]; then
+            echo 'ERROR: output/bootstrap-arm.zip is missing or empty' >&2
+            ls -la output
             exit 1
           fi
-          if ! unzip -t bootstrap-arm.zip > unzip-test.log 2>&1; then
+          if ! unzip -t output/bootstrap-arm.zip > unzip-test.log 2>&1; then
             echo 'ERROR: ZIP integrity check failed' >&2
             tail -n 50 unzip-test.log >&2
             exit 1
           fi
           echo 'ZIP integrity check passed.'
-          unzip -Z1 bootstrap-arm.zip > archive-files.txt
+          unzip -Z1 output/bootstrap-arm.zip > archive-files.txt
           if ! grep -Eq '^(\./)?bin/bzip2$' archive-files.txt; then
             echo 'ERROR: bootstrap archive does not contain bin/bzip2' >&2
             exit 1
           fi
-          sha256sum bootstrap-arm.zip > SHA256SUMS.txt
+          sha256sum output/bootstrap-arm.zip > SHA256SUMS.txt
           {
             echo 'Experimental bootstrap; not an APK and not device-tested.'
             echo 'Target package: com.termyou'
@@ -95,12 +112,12 @@ jobs:
           } > BUILD-INFO.txt
 
       - name: Upload bootstrap artifact (including for diagnostics if validation fails)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && !inputs.preflight_only }}
         uses: actions/upload-artifact@v4
         with:
           name: termyou-bootstrap-arm-experimental
           path: |
-            termux-packages/bootstrap-arm.zip
+            termux-packages/output/bootstrap-arm.zip
             termux-packages/SHA256SUMS.txt
             termux-packages/BUILD-INFO.txt
           if-no-files-found: warn
