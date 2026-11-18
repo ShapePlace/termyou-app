@@ -41,6 +41,7 @@ android {
     }
 
     defaultConfig {
+        applicationId "com.termyou"
         minSdkVersion project.properties.minSdkVersion.toInteger()
         targetSdkVersion project.properties.targetSdkVersion.toInteger()
         versionCode 118
@@ -51,8 +52,8 @@ android {
 
         buildConfigField "String", "TERMUX_PACKAGE_VARIANT", "\"" + project.ext.packageVariant + "\"" // Used by TermuxApplication class
 
-        manifestPlaceholders.TERMUX_PACKAGE_NAME = "com.termux"
-        manifestPlaceholders.TERMUX_APP_NAME = "Termux"
+        manifestPlaceholders.TERMUX_PACKAGE_NAME = "com.termyou"
+        manifestPlaceholders.TERMUX_APP_NAME = "Termyou"
         manifestPlaceholders.TERMUX_API_APP_NAME = "Termux:API"
         manifestPlaceholders.TERMUX_BOOT_APP_NAME = "Termux:Boot"
         manifestPlaceholders.TERMUX_FLOAT_APP_NAME = "Termux:Float"
@@ -71,8 +72,8 @@ android {
                 enable ((gradle.startParameter.taskNames.any { it.contains("Debug") } && splitAPKsForDebugBuilds == "1") ||
                     (gradle.startParameter.taskNames.any { it.contains("Release") } && splitAPKsForReleaseBuilds == "1"))
                 reset ()
-                include 'x86', 'x86_64', 'armeabi-v7a', 'arm64-v8a'
-                universalApk true
+                include 'armeabi-v7a'
+                universalApk false
             }
         }
     }
@@ -217,6 +218,31 @@ clean {
 
 task downloadBootstraps() {
     doLast {
+        def customArmSha = System.getenv("TERMYOU_CUSTOM_BOOTSTRAP_ARM_SHA256")
+        if (customArmSha) {
+            def localUrl = "src/main/cpp/bootstrap-arm.zip"
+            def file = new File(projectDir, localUrl)
+            if (!file.exists()) {
+                throw new GradleException("Missing required custom bootstrap at " + localUrl)
+            }
+            def digest = java.security.MessageDigest.getInstance("SHA-256")
+            def buffer = new byte[8192]
+            def input = new FileInputStream(file)
+            while (true) {
+                def readBytes = input.read(buffer)
+                if (readBytes < 0) break
+                digest.update(buffer, 0, readBytes)
+            }
+            input.close()
+            def checksum = new BigInteger(1, digest.digest()).toString(16)
+            while (checksum.length() < 64) { checksum = "0" + checksum }
+            if (checksum != customArmSha) {
+                throw new GradleException("Custom bootstrap checksum mismatch for " + localUrl + ": expected: " + customArmSha + ", actual: " + checksum)
+            }
+            logger.quiet("Verified custom bootstrap: " + localUrl + " (" + checksum + ")")
+            return
+        }
+
         def packageVariant = project.ext.packageVariant
         if (packageVariant == "apt-android-7") {
             def version = "2026.02.12-r1" + "%2B" + "apt.android-7"
