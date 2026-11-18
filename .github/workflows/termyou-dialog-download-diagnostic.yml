@@ -1,0 +1,46 @@
+name: Termyou dialog download diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-download:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check dialog source download
+        shell: bash
+        run: |
+          set -euo pipefail
+          url='https://invisible-mirror.net/archives/dialog/dialog-1.3-20260721.tgz'
+          expected='62bdf59057d4f760a1cc2217827f07887b4a3eebf694c25eacd4803d2171cdc6'
+          if ! curl --fail --location --retry 2 --max-time 60 --silent --show-error \
+              --dump-header headers.txt --output dialog.tgz "$url"; then
+            echo 'ERROR: download failed at HTTP/network level.' >&2
+            exit 1
+          fi
+          echo 'Response headers:'
+          grep -iE '^(HTTP/|content-type:|content-length:|server:|location:)' headers.txt || true
+          echo "Downloaded size: $(wc -c < dialog.tgz) bytes"
+          echo "File type: $(file -b dialog.tgz)"
+          actual=$(sha256sum dialog.tgz | cut -d ' ' -f 1)
+          echo "Expected SHA-256: $expected"
+          echo "Actual SHA-256:   $actual"
+          if [ "$actual" != "$expected" ]; then
+            echo 'ERROR: checksum mismatch; downloaded content will not be used.' >&2
+            python3 - <<'PY'
+          from pathlib import Path
+          import re
+          data = Path('dialog.tgz').read_bytes()[:8192]
+          if b'<html' in data.lower() or b'<!doctype html' in data.lower():
+              text = data.decode('utf-8', errors='replace')
+              title = re.search(r'<title[^>]*>(.*?)</title>', text, re.I | re.S)
+              if title:
+                  print('HTML page title:', ' '.join(title.group(1).split())[:200])
+          PY
+            exit 1
+          fi
+          echo 'PASS: downloaded file matches the pinned upstream SHA-256.'
