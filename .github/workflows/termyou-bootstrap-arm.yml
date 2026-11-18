@@ -74,6 +74,17 @@ jobs:
               raise SystemExit('Expected termux-tools configure hook not found')
           recipe.write_text(text.replace(old, new, 1))
 
+          # Use an alternate mirror for the same pinned dialog source archive.
+          # The upstream SHA-256 remains unchanged and is checked by the builder.
+          recipe = Path('packages/dialog/build.sh')
+          text = recipe.read_text()
+          old = 'https://invisible-mirror.net/archives/dialog/dialog-${TERMUX_PKG_VERSION}.tgz'
+          new = 'https://distfiles.macports.org/dialog/dialog-${TERMUX_PKG_VERSION}.tgz'
+          expected_hash = 'TERMUX_PKG_SHA256=62bdf59057d4f760a1cc2217827f07887b4a3eebf694c25eacd4803d2171cdc6'
+          if text.count(old) != 1 or text.count(expected_hash) != 1:
+              raise SystemExit('Expected pinned dialog source and checksum not found')
+          recipe.write_text(text.replace(old, new, 1))
+
           # Keep the first experimental bootstrap offline by default.
           # Do not substitute a custom public repository without verification.
           recipe = Path('packages/apt/build.sh')
